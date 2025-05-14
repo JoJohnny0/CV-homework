@@ -7,7 +7,7 @@ import pytorch_ssim
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import auc
 from sklearn.metrics import precision_recall_curve
-import mdn1
+#import mdn1
 from VT_AE import VT_AE
 from scipy.ndimage import gaussian_filter
 
@@ -22,7 +22,7 @@ data = mvtech.Mvtec(1,product=prdt)
 
 # Model declaration
 model = VT_AE(train=False).cuda()
-G_estimate= mdn1.MDN().cuda()
+#G_estimate= mdn1.MDN().cuda()
 
 # Loading weights
 model.load_state_dict(torch.load(f'./saved_model/VT_AE_Mvtech_{prdt}'+'.pt'))

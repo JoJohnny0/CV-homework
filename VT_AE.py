@@ -9,7 +9,6 @@ from torch.distributions import Normal
 from torchmetrics.functional.image import structural_similarity_index_measure as ssim
 
 import spatial as S
-import mdn1
 
 
 class CustomNormTransformerEncoderLayer(nn.TransformerEncoderLayer):
@@ -27,6 +26,7 @@ class VTAE(pl.LightningModule):
                  patch_size: int,
                  embedding_dim: int,
                  depth: int,
+                 coefs: int,
                  heads: int,
                  mlp_dim: int,
                  channels: int = 3,
@@ -55,7 +55,7 @@ class VTAE(pl.LightningModule):
 
         # Capsule layer
         in_caps: int = num_patches * 8 * 8
-        self.digcap: S.DigitCaps = S.DigitCaps(in_num_caps=in_caps, in_dim_caps = 8)
+        self.digcap: S.DigitCaps = S.DigitCaps(in_num_caps = in_caps, in_dim_caps = 8)
 
         # Decoder
         self.decoder: nn.Sequential = nn.Sequential(nn.ConvTranspose2d(8, 16, 3, stride = 2, padding = 1), # b,8,8,8 -> b,16,15,15
@@ -77,20 +77,34 @@ class VTAE(pl.LightningModule):
                                                     nn.Tanh()
                                                     )
 
-        # initialize weights
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
         # Losses
         self.mse_loss = nn.MSELoss()
-        self.ssim_loss = lambda x, y: -torch.Tensor(ssim(x, y))
-        self.mdn_loss = mdn1.mdn_loss_function
+        self.ssim_loss = lambda x, y: 1 - torch.Tensor(ssim(x, y))
 
         # MDN network
-        self.G_estimate = mdn1.MDN()
+        self.pi = nn.Sequential(nn.Linear(embedding_dim, coefs, bias = False),
+                                nn.Softmax(dim = -1)
+                                )
+        
+        self.mu = nn.Linear(embedding_dim, embedding_dim * coefs, bias = False)  # mean
+        
+        self.sigma_sq = nn.Sequential(nn.Linear(embedding_dim, embedding_dim * coefs, bias = False),  # isotropic independent variance
+                                      nn.Softplus()
+                                      )
+    
+
+    # TEST ANDRÀ GESTITO
+    def mdn_loss(self, x, means, logvars, weights, test: bool = False):
+
+        stds = torch.exp(logvars / 2)                # [B, T, D, K]
+        x = x.unsqueeze(-1)                       # [B, T, D, 1]
+        normal = Normal(means, stds)
+        log_prob = normal.log_prob(x).sum(2)              # [B, T, K]
+        nll = -log_prob * weights                     # [B, T, K]
+        nll = nll.sum(dim=2)                          # [B, T]
+        if not test:
+            return nll.sum(dim=1).mean()              # scalare
+        return nll                                    # [B, T]
 
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -121,7 +135,7 @@ class VTAE(pl.LightningModule):
 
         # Capsule
         flat: torch.Tensor = features.view(batch_size, -1, 8)
-        caps_output, _ = self.digcap(flat)
+        caps_output = self.digcap(flat)
 
         # Decode
         caps_feat: torch.Tensor = caps_output.view(batch_size, -1, 8, 8)
@@ -136,7 +150,9 @@ class VTAE(pl.LightningModule):
         features, recon = self(x)
 
         # MDN forward
-        pi, mu, sigma = self.G_estimate(features)
+        pi = self.pi(features)
+        mu = self.mu(features).view(features.size(0), features.size(1), self.hparams.embedding_dim, -1) # type: ignore
+        sigma = self.sigma_sq(features).view(features.size(0), features.size(1), self.hparams.embedding_dim, -1)    # type: ignore
 
         # Loss terms
         loss_recon: torch.Tensor = self.mse_loss(recon, x)
@@ -156,7 +172,7 @@ class VTAE(pl.LightningModule):
         return self.step(batch, 'val')
 
     def configure_optimizers(self) -> torch.optim.Adam:
-        return torch.optim.Adam(list(self.parameters()) + list(self.G_estimate.parameters()),
+        return torch.optim.Adam(self.parameters(),
                                 lr = self.hparams.lr,   # type: ignore
                                 weight_decay = 1e-4
                                 )
