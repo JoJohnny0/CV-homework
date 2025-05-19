@@ -42,12 +42,6 @@ def Patch_Overlap_Score(data_load = loader[1:]):
     norm_loss_t = []
     normalised_score_t = []
     mask_score_t = []
-    loss1_tn = []
-    loss2_tn = []
-    loss3_tn = []
-    loss1_ta = []
-    loss2_ta = []
-    loss3_ta = []
     
     score_tn = []
     score_ta = []
@@ -68,15 +62,6 @@ def Patch_Overlap_Score(data_load = loader[1:]):
             loss = loss1 -loss2 + loss3.max()       #Total loss
             norm_loss_t.append(loss3.detach().cpu().numpy())
             total_loss_all.append(loss.detach().cpu().numpy())
-            
-            if n == 0 :
-                loss1_tn.append(loss1.detach().cpu().numpy())
-                loss2_tn.append(loss2.detach().cpu().numpy())
-                loss3_tn.append(loss3.sum().detach().cpu().numpy())
-            if n == 1:
-                loss1_ta.append(loss1.detach().cpu().numpy())
-                loss2_ta.append(loss2.detach().cpu().numpy())
-                loss3_ta.append(loss3.sum().detach().cpu().numpy())
                 
             mask_score_t.append(j.squeeze(0).squeeze(0).cpu().numpy()) # Storing all masks
             
@@ -128,6 +113,7 @@ def Patch_Overlap_Score(data_load = loader[1:]):
 
     
     return PRO_score, AUC_Score_total, AUC_PR
+
 
 if __name__=="__main__":
     
