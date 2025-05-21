@@ -15,6 +15,33 @@ from torchmetrics.functional.image import structural_similarity_index_measure as
 from torchvision.transforms.functional import gaussian_blur
 
 
+class DyTanh(nn.Module):
+    """
+    DyTanh normalization layer.
+    """
+
+    def __init__(self, dim: int, alpha: float = 0.5) -> None:
+        """
+        Initialize the DyTanh layer.
+
+        Args:
+            dim: Dimension of the input tensor.
+            alpha: Starting scaling factor to apply before the tanh.
+        """
+
+        super().__init__()
+        
+        self.alpha: torch.Tensor = nn.Parameter(torch.full((dim,), alpha))
+        self.tanh: nn.Tanh = nn.Tanh()
+        self.weights: torch.Tensor = nn.Parameter(torch.ones(dim))
+        self.bias: torch.Tensor = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        x = self.tanh(x * self.alpha)
+        return self.weights * x + self.bias
+
+
 class VTAE(pl.LightningModule):
     """
     Vision Transformer Autoencoder (VT-AE) model for anomaly detection.
@@ -32,7 +59,7 @@ class VTAE(pl.LightningModule):
                  use_dytanh: bool = False
                  ) -> None:
         """
-        Initialize the VTAE model.
+        Initialize the VTAE model. Input must be a 3-channel image of size (512, 512).
 
         Args:
             patch_shape: Shape of the patches used in the ViT encoder.
@@ -51,7 +78,7 @@ class VTAE(pl.LightningModule):
 
         self.image_side: int = 512
         self.channels: int = 3
-        self.capsule_dim = 8
+        self.capsule_dim: int = 8
         self.n_caps: int = 64
 
         # ViT encoder
@@ -72,7 +99,8 @@ class VTAE(pl.LightningModule):
                                                                                norm_first = True,
                                                                                )
         if use_dytanh:
-            pass
+            encoder_layer.norm1 = DyTanh(embedding_dim) # type: ignore
+            encoder_layer.norm2 = DyTanh(embedding_dim) # type: ignore
         self.transformer: nn.TransformerEncoder = nn.TransformerEncoder(encoder_layer, num_layers = depth)
 
         # Noise
@@ -102,17 +130,17 @@ class VTAE(pl.LightningModule):
                                                     )
 
         # Losses
-        self.mse_loss = nn.MSELoss()
+        self.mse_loss: nn.MSELoss = nn.MSELoss()
         self.ssim_loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = lambda x, y: 1 - ssim(x, y)  # type: ignore
 
         # MDN network
-        self.pi = nn.Sequential(nn.Linear(embedding_dim, coefs, bias = False),
-                                nn.Softmax(dim = -1)
-                                )
-        self.mu = nn.Linear(embedding_dim, embedding_dim * coefs, bias = False)
-        self.sigma_sq = nn.Sequential(nn.Linear(embedding_dim, embedding_dim * coefs, bias = False),
-                                      nn.Softplus()
-                                      )
+        self.mdn_weights: nn.Sequential = nn.Sequential(nn.Linear(embedding_dim, coefs, bias = False),
+                                                        nn.Softmax(dim = -1)
+                                                        )
+        self.mdn_means: nn.Linear = nn.Linear(embedding_dim, embedding_dim * coefs, bias = False)
+        self.mdn_logvars: nn.Sequential = nn.Sequential(nn.Linear(embedding_dim, embedding_dim * coefs, bias = False),
+                                                        nn.Softplus()
+                                                        )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -154,15 +182,15 @@ class VTAE(pl.LightningModule):
         masked_out: torch.Tensor = capsule_out * mask.unsqueeze(-1) # type: ignore
 
         # Decode
-        caps_feat: torch.Tensor = masked_out.view(batch_size, 8, 8, 8)
-        recon: torch.Tensor = self.decoder(caps_feat)
+        caps_features: torch.Tensor = masked_out.view(batch_size, 8, 8, 8)
+        recon: torch.Tensor = self.decoder(caps_features)
 
         return features, recon
     
     @staticmethod
     def _squash(inputs: torch.Tensor) -> torch.Tensor:
         """
-        Normalize and scale the input tensor.
+        Squashing function to normalize the capsule outputs.
         """
 
         norm: torch.Tensor = torch.norm(inputs, dim = -1, keepdim = True)
@@ -171,20 +199,26 @@ class VTAE(pl.LightningModule):
 
 
     def mdn_loss(self, features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the loss for the Mixture Density Network using the features from the encoder.
+        """
 
-        # MDN forward
-        weights: torch.Tensor = self.pi(features)
-        means: torch.Tensor = self.mu(features)
-        means = means.view(*features.size(), -1)
-        logvars: torch.Tensor = self.sigma_sq(features)
-        logvars = logvars.view(*features.size(), -1)
+        # Parameters
+        logvars: torch.Tensor = self.mdn_logvars(features)
+        means: torch.Tensor = self.mdn_means(features)
+        weights: torch.Tensor = self.mdn_weights(features)
 
-        # MDN loss
-        stds: torch.Tensor = torch.exp(logvars / 2)
+        # Reshape
+        logvars = logvars.view(*features.size(), self.hparams.coefs)    # type: ignore
+        means = means.view(*features.size(), self.hparams.coefs)    # type: ignore
         features = features.unsqueeze(-1)
-        normal: Normal = Normal(means, stds)
-        log_prob: torch.Tensor = normal.log_prob(features).sum(2)
+
+        # Loss
+        stds: torch.Tensor = torch.exp(logvars / 2)
+        log_prob: torch.Tensor = Normal(means, stds).log_prob(features)
+        log_prob = log_prob.sum(2)
         nll: torch.Tensor = -torch.einsum('p b e, p b e -> p b', log_prob, weights)
+
         return nll
 
 
