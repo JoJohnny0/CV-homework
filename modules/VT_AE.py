@@ -163,23 +163,26 @@ class VTAE(pl.LightningModule):
             features += self.noise.sample(features.size()).to(features.device)
 
         # Capsule
-        x_hat: torch.Tensor = torch.einsum('p b e, n e c -> p b n c', features, self.caps_weights)
+        x_proj: torch.Tensor = torch.einsum('p b e, n e c -> p b n c', features, self.caps_weights)
+        x_proj_detached: torch.Tensor = x_proj.detach()
         logits: torch.Tensor = torch.zeros(self.n_patches, batch_size, self.n_caps, device = features.device)
+        coeffs: torch.Tensor = F.softmax(logits, dim = -1)
 
         n_iters: int = 3
         capsule_out: torch.Tensor
-        for i in range(n_iters):
-            coeffs: torch.Tensor = F.softmax(logits, dim = -1)
-            capsule_out = torch.einsum('p b n c, p b n -> b n c', x_hat, coeffs)
+        for i in range(n_iters - 1):
+            capsule_out = torch.einsum('p b n c, p b n -> b n c', x_proj_detached, coeffs)
             capsule_out = self._squash(capsule_out)
-            if i != n_iters - 1:
-                logits += torch.einsum('b n c, p b n c -> p b n', capsule_out, x_hat)
+            logits += torch.einsum('b n c, p b n c -> p b n', capsule_out, x_proj_detached)
+            coeffs: torch.Tensor = F.softmax(logits, dim = -1)
+        capsule_out = torch.einsum('p b n c, p b n -> b n c', x_proj, coeffs)
+        capsule_out = self._squash(capsule_out)
 
         # Masking
-        norms: torch.Tensor = torch.norm(capsule_out, dim = -1) # type: ignore
+        norms: torch.Tensor = torch.norm(capsule_out, dim = -1)
         predictions: torch.Tensor = norms.argmax(dim = -1)
         mask: torch.Tensor = F.one_hot(predictions, num_classes = self.n_caps)
-        masked_out: torch.Tensor = capsule_out * mask.unsqueeze(-1) # type: ignore
+        masked_out: torch.Tensor = capsule_out * mask.unsqueeze(-1)
 
         # Decode
         caps_features: torch.Tensor = masked_out.view(batch_size, 8, 8, 8)
