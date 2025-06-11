@@ -52,6 +52,9 @@ class VTAE(pl.LightningModule):
                  embedding_dim: int,
                  heads: int,
                  depth: int,
+                 caps_per_patch: int,
+                 caps_dim: int,
+                 caps_depth: int,
                  ff_dim: int,
                  coefs: int,
                  noise: float,
@@ -66,6 +69,9 @@ class VTAE(pl.LightningModule):
             embedding_dim: Dimension of the embedding space.
             heads: Number of attention heads in the transformer encoder.
             depth: Number of transformer encoder layers.
+            caps_per_patch: Number of capsules per patch.
+            caps_dim: Dimension of the capsules in the capsule layer.
+            caps_depth: Depth of the capsule layer.
             ff_dim: Dimension of the feedforward network in the transformer encoder.
             coefs: Number of mixture components in the mixture density network.
             noise: Standard deviation of the Gaussian noise added to the features during training.
@@ -78,8 +84,6 @@ class VTAE(pl.LightningModule):
 
         self.image_side: int = 512
         self.channels: int = 3
-        self.capsule_dim: int = 8
-        self.n_caps: int = 64
 
         # ViT encoder
         self.n_patches: int = (self.image_side // patch_shape[0]) * (self.image_side // patch_shape[1])
@@ -107,7 +111,7 @@ class VTAE(pl.LightningModule):
         self.noise: Normal = Normal(0, noise)
 
         # Capsule layer
-        self.caps_weights: torch.Tensor = nn.Parameter(0.01 * torch.randn(self.n_caps, embedding_dim, self.capsule_dim))
+        self.caps_weights: torch.Tensor = nn.Parameter(0.01 * torch.randn(self.n_patches * caps_per_patch, caps_dim, embedding_dim))
 
         # Decoder
         self.decoder: nn.Sequential = nn.Sequential(nn.ConvTranspose2d(8, 16, 3, stride = 2, padding = 1),  # b,8,8,8 -> b,16,15,15
@@ -163,29 +167,27 @@ class VTAE(pl.LightningModule):
             features += self.noise.sample(features.size()).to(features.device)
 
         # Capsule
-        x_proj: torch.Tensor = torch.einsum('p b e, n e c -> p b n c', features, self.caps_weights)
+        x_proj: torch.Tensor = torch.einsum('n c e, p b e -> b n e', self.caps_weights, features)
         x_proj_detached: torch.Tensor = x_proj.detach()
-        logits: torch.Tensor = torch.zeros(self.n_patches, batch_size, self.n_caps, device = features.device)
+        logits: torch.Tensor = torch.zeros(batch_size,
+                                           1,
+                                           self.n_patches * self.hparams.caps_per_patch,    # type: ignore
+                                           device = features.device
+                                           )
         coeffs: torch.Tensor = F.softmax(logits, dim = -1)
 
-        n_iters: int = 3
+        n_iters: int = self.hparams.caps_depth  # type: ignore
         capsule_out: torch.Tensor
-        for i in range(n_iters - 1):
-            capsule_out = torch.einsum('p b n c, p b n -> b n c', x_proj_detached, coeffs)
+        for _ in range(n_iters - 1):
+            capsule_out = coeffs @ x_proj_detached
             capsule_out = self._squash(capsule_out)
-            logits += torch.einsum('b n c, p b n c -> p b n', capsule_out, x_proj_detached)
+            logits += capsule_out @ x_proj_detached.mT
             coeffs: torch.Tensor = F.softmax(logits, dim = -1)
-        capsule_out = torch.einsum('p b n c, p b n -> b n c', x_proj, coeffs)
+        capsule_out = coeffs @ x_proj
         capsule_out = self._squash(capsule_out)
 
-        # Masking
-        norms: torch.Tensor = torch.norm(capsule_out, dim = -1)
-        predictions: torch.Tensor = norms.argmax(dim = -1)
-        mask: torch.Tensor = F.one_hot(predictions, num_classes = self.n_caps)
-        masked_out: torch.Tensor = capsule_out * mask.unsqueeze(-1)
-
         # Decode
-        caps_features: torch.Tensor = masked_out.view(batch_size, 8, 8, 8)
+        caps_features: torch.Tensor = capsule_out.view(batch_size, 8, 8, 8)
         recon: torch.Tensor = self.decoder(caps_features)
 
         return features, recon
