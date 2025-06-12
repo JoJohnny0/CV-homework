@@ -1,45 +1,18 @@
 """
-Module containing the Vision Transformer Autoencoder (VT-AE) model, available in the VTAE class.
+Module containing the VTAE class, implementing a Vision Transformer Autoencoder for anomaly detection.
 """
 
 from collections.abc import Callable
 
-import einops
 import lightning.pytorch as pl
 import torch
 from torch.distributions import Normal
 import torch.nn as nn
-import torch.nn.functional as F
 from torchmetrics.functional.classification import binary_auroc
 from torchmetrics.functional.image import structural_similarity_index_measure as ssim
 from torchvision.transforms.functional import gaussian_blur
 
-
-class DyTanh(nn.Module):
-    """
-    DyTanh normalization layer.
-    """
-
-    def __init__(self, dim: int, alpha: float = 0.5) -> None:
-        """
-        Initialize the DyTanh layer.
-
-        Args:
-            dim: Dimension of the input tensor.
-            alpha: Starting scaling factor to apply before the tanh.
-        """
-
-        super().__init__()
-        
-        self.alpha: torch.Tensor = nn.Parameter(torch.full((dim,), alpha))
-        self.tanh: nn.Tanh = nn.Tanh()
-        self.weights: torch.Tensor = nn.Parameter(torch.ones(dim))
-        self.bias: torch.Tensor = nn.Parameter(torch.zeros(dim))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        x = self.tanh(x * self.alpha)
-        return self.weights * x + self.bias
+from modules import capsule, decoder, encoder
 
 
 class VTAE(pl.LightningModule):
@@ -48,30 +21,32 @@ class VTAE(pl.LightningModule):
     """
 
     def __init__(self,
+                 image_shape: tuple[int, int, int],
                  patch_shape: tuple[int, int],
-                 embedding_dim: int,
+                 latent_channels: int,
                  heads: int,
                  depth: int,
                  caps_per_patch: int,
                  caps_dim: int,
-                 caps_depth: int,
+                 caps_iterations: int,
                  ff_dim: int,
                  coefs: int,
-                 noise: float,
+                 noise: float = 0.,
                  lr: float = 1e-3,
                  use_dytanh: bool = False
                  ) -> None:
         """
-        Initialize the VTAE model. Input must be a 3-channel image of size (512, 512).
+        Initialize the VTAE model.
 
         Args:
+            image_shape: Shape of the input image (c, h, w).
             patch_shape: Shape of the patches used in the ViT encoder.
-            embedding_dim: Dimension of the embedding space.
-            heads: Number of attention heads in the transformer encoder.
+            latent_channels: Number of channels in the latent space.
+            heads: Number of attention heads in the transformer encoder. To ensure compatibility with the decoder, it should be a divisor of the latent_channels. It may also work with other values.
             depth: Number of transformer encoder layers.
             caps_per_patch: Number of capsules per patch.
             caps_dim: Dimension of the capsules in the capsule layer.
-            caps_depth: Depth of the capsule layer.
+            caps_iterations: Number of routing iterations in the capsule layer.
             ff_dim: Dimension of the feedforward network in the transformer encoder.
             coefs: Number of mixture components in the mixture density network.
             noise: Standard deviation of the Gaussian noise added to the features during training.
@@ -82,56 +57,33 @@ class VTAE(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.image_side: int = 512
-        self.channels: int = 3
+        # Decoder
+        self.decoder: decoder.Decoder = decoder.Decoder(out_shape = image_shape, in_channels = latent_channels)
+        self.decoder_input_shape: tuple[int, int] = self.decoder.get_input_shape()
+
+        self.n_patches: int = (image_shape[1] // patch_shape[0]) * (image_shape[2] // patch_shape[1])
+        embedding_dim: int = latent_channels * self.decoder_input_shape[0] * self.decoder_input_shape[1]
 
         # ViT encoder
-        self.n_patches: int = (self.image_side // patch_shape[0]) * (self.image_side // patch_shape[1])
-
-        self.embed_image: nn.Conv2d = nn.Conv2d(self.channels,
-                                                out_channels = embedding_dim,
-                                                kernel_size = patch_shape,
-                                                stride = patch_shape
-                                                )
-        self.pos_embedding: torch.Tensor = nn.Parameter(torch.randn(self.n_patches + 1, 1, embedding_dim))
-        self.cls_token: torch.Tensor = nn.Parameter(torch.randn(1, 1, embedding_dim))
-
-        encoder_layer: nn.TransformerEncoderLayer = nn.TransformerEncoderLayer(d_model = embedding_dim,
-                                                                               nhead = heads,
-                                                                               dim_feedforward = ff_dim,
-                                                                               activation = 'gelu',
-                                                                               norm_first = True,
-                                                                               )
-        if use_dytanh:
-            encoder_layer.norm1 = DyTanh(embedding_dim) # type: ignore
-            encoder_layer.norm2 = DyTanh(embedding_dim) # type: ignore
-        self.transformer: nn.TransformerEncoder = nn.TransformerEncoder(encoder_layer, num_layers = depth)
+        self.encoder: encoder.ViTEncoder = encoder.ViTEncoder(patch_shape = patch_shape,
+                                                              n_patches = self.n_patches,
+                                                              n_channels = image_shape[0],
+                                                              embedding_dim = embedding_dim,
+                                                              heads = heads,
+                                                              depth = depth,
+                                                              ff_dim = ff_dim,
+                                                              use_dytanh = use_dytanh
+                                                              )
 
         # Noise
-        self.noise: Normal = Normal(0, noise)
+        self.noise: Normal|None = Normal(0, noise) if noise > 0 else None
 
         # Capsule layer
-        self.caps_weights: torch.Tensor = nn.Parameter(0.01 * torch.randn(self.n_patches * caps_per_patch, caps_dim, embedding_dim))
-
-        # Decoder
-        self.decoder: nn.Sequential = nn.Sequential(nn.ConvTranspose2d(8, 16, 3, stride = 2, padding = 1),  # b,8,8,8 -> b,16,15,15
-                                                    nn.BatchNorm2d(16),
-                                                    nn.ReLU(inplace = True),
-                                                    nn.ConvTranspose2d(16, 32, 9, stride = 3, padding = 1), # -> b,32,49,49
-                                                    nn.BatchNorm2d(32),
-                                                    nn.ReLU(inplace = True),
-                                                    nn.ConvTranspose2d(32, 32, 7, stride = 5, padding = 1), # -> b,32,245,245
-                                                    nn.BatchNorm2d(32),
-                                                    nn.ReLU(inplace = True),
-                                                    nn.ConvTranspose2d(32, 16, 9, stride = 2),              # -> b,16,497,497
-                                                    nn.BatchNorm2d(16),
-                                                    nn.ReLU(inplace = True),
-                                                    nn.ConvTranspose2d(16, 8, 6, stride = 1),               # -> b,8,502,502
-                                                    nn.BatchNorm2d(8),
-                                                    nn.ReLU(inplace = True),
-                                                    nn.ConvTranspose2d(8, 3, 11, stride = 1),               # -> b,3,512,512
-                                                    nn.Tanh()
-                                                    )
+        self.caps = capsule.Capsule(n_caps = self.n_patches * caps_per_patch,
+                                    caps_dim = caps_dim,
+                                    output_dim = embedding_dim,
+                                    iterations = caps_iterations
+                                    )
 
         # Losses
         self.mse_loss: nn.MSELoss = nn.MSELoss()
@@ -148,59 +100,25 @@ class VTAE(pl.LightningModule):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
-        batch_size: int = x.size(0)
-
-        # ViT embedding
-        embeds: torch.Tensor = self.embed_image(x)
-        embeds = einops.rearrange(embeds, 'b d h w -> (h w) b d')
-
-        # Add CLS and position
-        cls_tokens: torch.Tensor = self.cls_token.expand(1, *embeds.size()[1:])
-        seq: torch.Tensor = torch.cat((cls_tokens, embeds)) + self.pos_embedding
-
-        # Transformer
-        seq = self.transformer(seq)
-        features: torch.Tensor = seq[1:]  # remove CLS token
+        # Encode the features
+        features: torch.Tensor = self.encoder(x)
 
         # Add noise during training
-        if self.training:
+        if self.training and self.noise is not None:
             features += self.noise.sample(features.size()).to(features.device)
 
         # Capsule
-        x_proj: torch.Tensor = torch.einsum('n c e, p b e -> b n e', self.caps_weights, features)
-        x_proj_detached: torch.Tensor = x_proj.detach()
-        logits: torch.Tensor = torch.zeros(batch_size,
-                                           1,
-                                           self.n_patches * self.hparams.caps_per_patch,    # type: ignore
-                                           device = features.device
-                                           )
-        coeffs: torch.Tensor = F.softmax(logits, dim = -1)
-
-        n_iters: int = self.hparams.caps_depth  # type: ignore
-        capsule_out: torch.Tensor
-        for _ in range(n_iters - 1):
-            capsule_out = coeffs @ x_proj_detached
-            capsule_out = self._squash(capsule_out)
-            logits += capsule_out @ x_proj_detached.mT
-            coeffs: torch.Tensor = F.softmax(logits, dim = -1)
-        capsule_out = coeffs @ x_proj
-        capsule_out = self._squash(capsule_out)
+        routed_caps: torch.Tensor = self.caps(features)
+        routed_caps = routed_caps.view(x.size(0),
+                                       self.hparams.latent_channels,    # type: ignore
+                                       self.decoder_input_shape[0],
+                                       self.decoder_input_shape[1]
+                                       )
 
         # Decode
-        caps_features: torch.Tensor = capsule_out.view(batch_size, 8, 8, 8)
-        recon: torch.Tensor = self.decoder(caps_features)
+        recon: torch.Tensor = self.decoder(routed_caps)
 
         return features, recon
-    
-    @staticmethod
-    def _squash(inputs: torch.Tensor) -> torch.Tensor:
-        """
-        Squashing function to normalize the capsule outputs.
-        """
-
-        norm: torch.Tensor = torch.norm(inputs, dim = -1, keepdim = True)
-        scale: torch.Tensor = norm / (1 + norm ** 2)
-        return scale * inputs
 
 
     def mdn_loss(self, features: torch.Tensor) -> torch.Tensor:
@@ -229,6 +147,8 @@ class VTAE(pl.LightningModule):
 
     def loss_step(self, x: torch.Tensor) -> torch.Tensor:
 
+        features: torch.Tensor
+        recon: torch.Tensor
         features, recon = self(x)
 
         # Loss terms

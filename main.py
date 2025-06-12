@@ -8,18 +8,19 @@ from modules.VT_AE import VTAE
 train_loader, val_loader, test_loader = mvtech.get_loaders(product = 'hazelnut', batch_size = 8)
 
 # Model
-model = VTAE(patch_shape = (64, 64),
-             embedding_dim = 512,
+model = VTAE(image_shape = (3, 512, 512),
+             latent_channels = 8,
+             patch_shape = (64, 64),
              depth = 6,
              coefs = 10,
-             heads = 8,
+             heads = 4,
              caps_per_patch = 64,
              caps_dim = 8,
-             caps_depth = 3,
+             caps_iterations = 3,
              ff_dim = 1024,
              noise = 0.2,
              lr = 1e-4,
-             use_dytanh = False,
+             use_dytanh = False
              )
 
 # Training
