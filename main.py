@@ -5,7 +5,7 @@ from modules.data import mvtech
 from modules.vtae import VTAE
 
 # Data
-train_loader, val_loader, test_loader = mvtech.get_loaders(product = 'hazelnut', batch_size = 8)
+train_loader, val_loader, test_loader = mvtech.get_loaders(product = 'cable', batch_size = 8)
 
 # Model
 model = VTAE(image_shape = (3, 512, 512),
@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 # ...existing code...
 
 # Test
-out_masks = trainer.predict(model, dataloaders=test_loader)
+trainer.test(model, dataloaders=test_loader)
 '''
 for i, batch in enumerate(out_masks):
     for j, mask in enumerate(batch):

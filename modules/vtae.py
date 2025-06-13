@@ -4,6 +4,7 @@ Module containing the VTAE class, implementing a Vision Transformer Autoencoder 
 
 from collections.abc import Callable
 
+from anomalib.metrics.pro import pro_score
 import lightning.pytorch as pl
 import torch
 from torch.distributions import Normal
@@ -92,6 +93,9 @@ class VTAE(pl.LightningModule):
         self.mse_loss: nn.MSELoss = nn.MSELoss()
         self.ssim_loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = lambda x, y: 1 - ssim(x, y)  # type: ignore
 
+        # Upsampler
+        self.upsampler: nn.UpsamplingBilinear2d = nn.UpsamplingBilinear2d((image_shape[1], image_shape[2]))
+
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -136,22 +140,24 @@ class VTAE(pl.LightningModule):
         return nll
 
     def loss_step(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the total loss for a single step.
+        """
 
         features: torch.Tensor
         recon: torch.Tensor
         features, recon = self(x)
 
         # Loss terms
-        loss_recon: torch.Tensor = self.mse_loss(recon, x)
-        loss_ssim: torch.Tensor = self.ssim_loss(x, recon)
-        loss_mdn: torch.Tensor = self.mdn_loss(features)
-        loss_mdn = loss_mdn.sum(-1).mean()
+        recon_loss: torch.Tensor = self.mse_loss(recon, x)
+        ssim_loss: torch.Tensor = self.ssim_loss(x, recon)
+        mdn_loss: torch.Tensor = self.mdn_loss(features)
+        mdn_loss = mdn_loss.sum(-1).mean()
 
         # Combined loss
-        loss: torch.Tensor = 5 * loss_recon + 0.5 * loss_ssim + loss_mdn
+        loss: torch.Tensor = 5 * recon_loss + 0.5 * ssim_loss + mdn_loss
 
-        return loss
-
+        return loss    
 
     def training_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
         
@@ -167,39 +173,49 @@ class VTAE(pl.LightningModule):
         self.log('val_loss', loss, prog_bar = True)
         return loss
     
+
     def predict_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
 
-        # MDN loss
         x: torch.Tensor = batch[0]
         features: torch.Tensor = self(x)[0]
         mdn_loss: torch.Tensor = self.mdn_loss(features)
+        
+        # Normalize the MDN loss
+        mdn_loss = (mdn_loss - mdn_loss.min()) / (mdn_loss.max() - mdn_loss.min())
 
-        # Reshape the anomaly map
+        # Target dimensions
         image_h: int = self.hparams.image_shape[1]  # type: ignore
         image_w: int = self.hparams.image_shape[2]  # type: ignore
-        patch_h: int = self.hparams.patch_shape[0]  # type: ignore
-        patch_w: int = self.hparams.patch_shape[1]  # type: ignore
-        anomaly_map: torch.Tensor = mdn_loss.view(x.size(0), 1, image_h // patch_h, image_w // patch_w)
+
+        # Reshape the anomaly map
+        anomaly_map: torch.Tensor = mdn_loss.view(mdn_loss.size(0),
+                                                  1,
+                                                  image_h // self.hparams.patch_shape[0],   # type: ignore
+                                                  image_w // self.hparams.patch_shape[1]    # type: ignore
+                                                  )
 
         # Upsample to original size
-        upsampler: nn.UpsamplingBilinear2d = nn.UpsamplingBilinear2d((image_h, image_w))
-        anomaly_map = upsampler(anomaly_map)
+        anomaly_map = self.upsampler(anomaly_map)
 
         # gaussian filter
         sigma: list[float] = [image_h / 128, image_w / 128]
         kernel_size: list[int] = [2 * round(4 * s) + 1 for s in sigma]
-        anomaly_map = gaussian_blur(anomaly_map, kernel_size = kernel_size, sigma = [image_h / 128, image_w / 128])
+        anomaly_map = gaussian_blur(anomaly_map, kernel_size = kernel_size, sigma = sigma)
         
         return anomaly_map
     
-    def test_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
+    def test_step(self, batch: list[torch.Tensor]) -> None:
 
-        out: torch.Tensor = self.predict_step(batch)
-        self.threshold = 0.5
-        mask_out: torch.Tensor = out > self.threshold
+        predictions: torch.Tensor = self.predict_step(batch)
         ground_truth: torch.Tensor = batch[1]
-        auroc = binary_auroc(out, ground_truth)
-        return auroc
+
+        # Compute the metrics
+        auroc: torch.Tensor = binary_auroc(predictions, ground_truth.int())
+        pro: torch.Tensor = pro_score(predictions, ground_truth, threshold = 0.5)
+
+        # Log the metrics
+        self.log('auroc', auroc, prog_bar = True)
+        self.log('pro_score', pro, prog_bar = True)
 
 
     def configure_optimizers(self) -> torch.optim.Adam:
