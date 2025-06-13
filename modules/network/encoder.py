@@ -90,7 +90,7 @@ class ViTEncoder(nn.Module):
 
         # Embedding
         x = self.embed_image(x)
-        x = einops.rearrange(x, 'b d h w -> (h w) b d')
+        x = einops.rearrange(x, 'b e h w -> (h w) b e')
 
         # Transformer
         return self.transformer(x + self.pos_embedding)

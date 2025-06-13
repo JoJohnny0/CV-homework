@@ -61,12 +61,12 @@ class VTAE(pl.LightningModule):
         self.decoder: decoder.Decoder = decoder.Decoder(out_shape = image_shape, in_channels = latent_channels)
         self.decoder_input_shape: tuple[int, int] = self.decoder.get_input_shape()
 
-        self.n_patches: int = (image_shape[1] // patch_shape[0]) * (image_shape[2] // patch_shape[1])
+        n_patches: int = (image_shape[1] // patch_shape[0]) * (image_shape[2] // patch_shape[1])
         embedding_dim: int = latent_channels * self.decoder_input_shape[0] * self.decoder_input_shape[1]
 
         # ViT encoder
         self.encoder: encoder.ViTEncoder = encoder.ViTEncoder(patch_shape = patch_shape,
-                                                              n_patches = self.n_patches,
+                                                              n_patches = n_patches,
                                                               n_channels = image_shape[0],
                                                               embedding_dim = embedding_dim,
                                                               heads = heads,
@@ -79,18 +79,18 @@ class VTAE(pl.LightningModule):
         self.noise: Normal|None = Normal(0, noise) if noise > 0 else None
 
         # Capsule layer
-        self.caps = capsule.Capsule(n_caps = self.n_patches * caps_per_patch,
+        self.caps = capsule.Capsule(n_caps = n_patches * caps_per_patch,
                                     caps_dim = caps_dim,
                                     output_dim = embedding_dim,
                                     iterations = caps_iterations
                                     )
+        
+        # MDN
+        self.mdn = mdn.MDN(input_dim = embedding_dim, n_components = mdn_components)
 
         # Losses
         self.mse_loss: nn.MSELoss = nn.MSELoss()
         self.ssim_loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = lambda x, y: 1 - ssim(x, y)  # type: ignore
-
-        # MDN
-        self.mdn = mdn.MDN(input_dim = embedding_dim, n_components = mdn_components)
 
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -131,7 +131,7 @@ class VTAE(pl.LightningModule):
         stds: torch.Tensor = torch.exp(sigma / 2)
         log_prob: torch.Tensor = Normal(mu, stds).log_prob(features.unsqueeze(-1))
         log_prob = log_prob.sum(2)
-        nll: torch.Tensor = -torch.einsum('p b e, p b e -> p b', log_prob, pi)
+        nll: torch.Tensor = -torch.einsum('p b e, p b e -> b p', log_prob, pi)
 
         return nll
 
@@ -145,7 +145,7 @@ class VTAE(pl.LightningModule):
         loss_recon: torch.Tensor = self.mse_loss(recon, x)
         loss_ssim: torch.Tensor = self.ssim_loss(x, recon)
         loss_mdn: torch.Tensor = self.mdn_loss(features)
-        loss_mdn = loss_mdn.sum(0).mean()
+        loss_mdn = loss_mdn.sum(-1).mean()
 
         # Combined loss
         loss: torch.Tensor = 5 * loss_recon + 0.5 * loss_ssim + loss_mdn
@@ -169,17 +169,27 @@ class VTAE(pl.LightningModule):
     
     def predict_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
 
+        # MDN loss
         x: torch.Tensor = batch[0]
-        features, recon = self(x)
-        mdn_loss = self.mdn_loss(features)
-        patch_size = self.hparams.patch_shape[0]   # type: ignore
+        features: torch.Tensor = self(x)[0]
+        mdn_loss: torch.Tensor = self.mdn_loss(features)
 
-        h = x.size(2) // patch_size
-        w = x.size(3) // patch_size
-        anomaly_map: torch.Tensor = mdn_loss.view(-1, 1, h, w)
-        anomaly_map = torch.nn.UpsamplingBilinear2d((512, 512))(anomaly_map)
+        # Reshape the anomaly map
+        image_h: int = self.hparams.image_shape[1]  # type: ignore
+        image_w: int = self.hparams.image_shape[2]  # type: ignore
+        patch_h: int = self.hparams.patch_shape[0]  # type: ignore
+        patch_w: int = self.hparams.patch_shape[1]  # type: ignore
+        anomaly_map: torch.Tensor = mdn_loss.view(x.size(0), 1, image_h // patch_h, image_w // patch_w)
+
+        # Upsample to original size
+        upsampler: nn.UpsamplingBilinear2d = nn.UpsamplingBilinear2d((image_h, image_w))
+        anomaly_map = upsampler(anomaly_map)
+
         # gaussian filter
-        anomaly_map = gaussian_blur(anomaly_map, kernel_size = 33, sigma = 4) # type: ignore
+        sigma: list[float] = [image_h / 128, image_w / 128]
+        kernel_size: list[int] = [2 * round(4 * s) + 1 for s in sigma]
+        anomaly_map = gaussian_blur(anomaly_map, kernel_size = kernel_size, sigma = [image_h / 128, image_w / 128])
+        
         return anomaly_map
     
     def test_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
