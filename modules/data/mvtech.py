@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, random_split, TensorDataset, Subset
 from torchvision import transforms
 from torchvision.io import read_image
 
-from modules import paths
+from modules import globals
 
 
 ProductType: TypeAlias = Literal['bottle',
@@ -91,7 +91,7 @@ def get_loaders(product: ProductType, batch_size: int = 1, val_split: float = 0.
     """
 
     # directories
-    data_dir: Path = paths.MVTECH_DIR
+    data_dir: Path = globals.MVTECH_DIR
     train_dir: Path = data_dir / product / 'train'
     test_dir: Path = data_dir / product / 'test'
     mask_dir: Path = data_dir / product / 'ground_truth'

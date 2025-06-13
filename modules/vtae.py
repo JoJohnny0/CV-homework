@@ -12,12 +12,12 @@ from torchmetrics.functional.classification import binary_auroc
 from torchmetrics.functional.image import structural_similarity_index_measure as ssim
 from torchvision.transforms.functional import gaussian_blur
 
-from modules import capsule, decoder, encoder
+from modules.network import capsule, decoder, encoder
 
 
 class VTAE(pl.LightningModule):
     """
-    Vision Transformer Autoencoder (VT-AE) model for anomaly detection.
+    Vision Transformer Autoencoder (VTAE) model for anomaly detection.
     """
 
     def __init__(self,

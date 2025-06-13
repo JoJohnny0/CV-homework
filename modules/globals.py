@@ -1,5 +1,5 @@
 """
-Module to define paths used in the whole project.
+Module to define global values used in the whole project.
 
 Useful constants:
 - MVTECH_DIR: Path to the MVTech dataset directory.
@@ -8,6 +8,5 @@ Useful constants:
 from pathlib import Path
 
 
-DATA_DIR: Path = Path('data')
-DATASET_DIR: Path = DATA_DIR / 'datasets'
+DATASET_DIR: Path = Path('datasets')
 MVTECH_DIR: Path = DATASET_DIR / 'mvtech'

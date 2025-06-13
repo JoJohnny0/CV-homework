@@ -1,8 +1,8 @@
 from lightning.pytorch import Trainer
 from torch.utils.data import DataLoader
 
-from modules import mvtech
-from modules.VT_AE import VTAE
+from modules.data import mvtech
+from modules.vtae import VTAE
 
 # Data
 train_loader, val_loader, test_loader = mvtech.get_loaders(product = 'hazelnut', batch_size = 8)
