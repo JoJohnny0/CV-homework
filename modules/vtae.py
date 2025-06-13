@@ -12,7 +12,7 @@ from torchmetrics.functional.classification import binary_auroc
 from torchmetrics.functional.image import structural_similarity_index_measure as ssim
 from torchvision.transforms.functional import gaussian_blur
 
-from modules.network import capsule, decoder, encoder
+from modules.network import capsule, decoder, encoder, mdn
 
 
 class VTAE(pl.LightningModule):
@@ -30,7 +30,7 @@ class VTAE(pl.LightningModule):
                  caps_dim: int,
                  caps_iterations: int,
                  ff_dim: int,
-                 coefs: int,
+                 mdn_components: int,
                  noise: float = 0.,
                  lr: float = 1e-3,
                  use_dytanh: bool = False
@@ -48,7 +48,7 @@ class VTAE(pl.LightningModule):
             caps_dim: Dimension of the capsules in the capsule layer.
             caps_iterations: Number of routing iterations in the capsule layer.
             ff_dim: Dimension of the feedforward network in the transformer encoder.
-            coefs: Number of mixture components in the mixture density network.
+            mdn_components: Number of mixture components in the mixture density network.
             noise: Standard deviation of the Gaussian noise added to the features during training.
             lr: Learning rate for the optimizer.
             use_dytanh: Whether to use dyTanh normalization. If not, use layer normalization.
@@ -89,14 +89,9 @@ class VTAE(pl.LightningModule):
         self.mse_loss: nn.MSELoss = nn.MSELoss()
         self.ssim_loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = lambda x, y: 1 - ssim(x, y)  # type: ignore
 
-        # MDN network
-        self.mdn_weights: nn.Sequential = nn.Sequential(nn.Linear(embedding_dim, coefs, bias = False),
-                                                        nn.Softmax(dim = -1)
-                                                        )
-        self.mdn_means: nn.Linear = nn.Linear(embedding_dim, embedding_dim * coefs, bias = False)
-        self.mdn_logvars: nn.Sequential = nn.Sequential(nn.Linear(embedding_dim, embedding_dim * coefs, bias = False),
-                                                        nn.Softplus()
-                                                        )
+        # MDN
+        self.mdn = mdn.MDN(input_dim = embedding_dim, n_components = mdn_components)
+
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -126,24 +121,19 @@ class VTAE(pl.LightningModule):
         Compute the loss for the Mixture Density Network using the features from the encoder.
         """
 
-        # Parameters
-        logvars: torch.Tensor = self.mdn_logvars(features)
-        means: torch.Tensor = self.mdn_means(features)
-        weights: torch.Tensor = self.mdn_weights(features)
-
-        # Reshape
-        logvars = logvars.view(*features.size(), self.hparams.coefs)    # type: ignore
-        means = means.view(*features.size(), self.hparams.coefs)    # type: ignore
-        features = features.unsqueeze(-1)
+        # MDN forward
+        pi: torch.Tensor
+        mu: torch.Tensor
+        sigma: torch.Tensor
+        pi, mu, sigma = self.mdn(features)
 
         # Loss
-        stds: torch.Tensor = torch.exp(logvars / 2)
-        log_prob: torch.Tensor = Normal(means, stds).log_prob(features)
+        stds: torch.Tensor = torch.exp(sigma / 2)
+        log_prob: torch.Tensor = Normal(mu, stds).log_prob(features.unsqueeze(-1))
         log_prob = log_prob.sum(2)
-        nll: torch.Tensor = -torch.einsum('p b e, p b e -> p b', log_prob, weights)
+        nll: torch.Tensor = -torch.einsum('p b e, p b e -> p b', log_prob, pi)
 
         return nll
-
 
     def loss_step(self, x: torch.Tensor) -> torch.Tensor:
 
@@ -161,6 +151,7 @@ class VTAE(pl.LightningModule):
         loss: torch.Tensor = 5 * loss_recon + 0.5 * loss_ssim + loss_mdn
 
         return loss
+
 
     def training_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
         
