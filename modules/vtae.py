@@ -1,8 +1,11 @@
 """
 Module containing the VTAE class, implementing a Vision Transformer Autoencoder for anomaly detection.
+
+Imports: network.capsule, network.decoder, network.encoder, network.mdn
 """
 
 from collections.abc import Callable
+from typing import Literal
 
 from anomalib.metrics.pro import pro_score
 import lightning.pytorch as pl
@@ -33,8 +36,11 @@ class VTAE(pl.LightningModule):
                  ff_dim: int,
                  mdn_components: int,
                  noise: float = 0.,
+                 loss_weights: tuple[float, float, float] = (1/3, 1/3, 1/3),
                  lr: float = 1e-3,
-                 use_dytanh: bool = False
+                 weight_decay: float = 0.,
+                 use_dytanh: bool = False,
+                 threshold: float = 0.5
                  ) -> None:
         """
         Initialize the VTAE model.
@@ -51,8 +57,11 @@ class VTAE(pl.LightningModule):
             ff_dim: Dimension of the feedforward network in the transformer encoder.
             mdn_components: Number of mixture components in the mixture density network.
             noise: Standard deviation of the Gaussian noise added to the features during training.
+            loss_weights: Weights for the reconstruction loss, SSIM loss, and MDN loss.
             lr: Learning rate for the optimizer.
+            weight_decay: Weight decay for the optimizer.
             use_dytanh: Whether to use dyTanh normalization. If not, use layer normalization.
+            threshold: Threshold for the anomaly map. Not used in the model, but can be used for evaluation.
         """
 
         super().__init__()
@@ -139,11 +148,15 @@ class VTAE(pl.LightningModule):
 
         return nll
 
-    def loss_step(self, x: torch.Tensor) -> torch.Tensor:
+    def loss_step(self, batch: list[torch.Tensor], split: Literal['train', 'val']) -> torch.Tensor:
         """
         Compute the total loss for a single step.
         """
 
+        # Extract the input tensor
+        x: torch.Tensor = batch[0]
+
+        # Forward pass 
         features: torch.Tensor
         recon: torch.Tensor
         features, recon = self(x)
@@ -154,24 +167,27 @@ class VTAE(pl.LightningModule):
         mdn_loss: torch.Tensor = self.mdn_loss(features)
         mdn_loss = mdn_loss.sum(-1).mean()
 
-        # Combined loss
-        loss: torch.Tensor = 5 * recon_loss + 0.5 * ssim_loss + mdn_loss
+        # Log the losses
+        self.log(f'{split}_recon_loss', recon_loss, prog_bar = True)
+        self.log(f'{split}_ssim_loss', ssim_loss, prog_bar = True)
+        self.log(f'{split}_mdn_loss', mdn_loss, prog_bar = True)
 
-        return loss    
+        # Weight the losses
+        recon_loss = self.hparams.loss_weights[0] * recon_loss  # type: ignore
+        ssim_loss = self.hparams.loss_weights[1] * ssim_loss    # type: ignore
+        mdn_loss = self.hparams.loss_weights[2] * mdn_loss  # type: ignore
+
+        # Combined loss
+        combined_loss: torch.Tensor = recon_loss + ssim_loss + mdn_loss
+        self.log(f'{split}_combined_loss', combined_loss, prog_bar = True)
+
+        return combined_loss
 
     def training_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
-        
-        x: torch.Tensor = batch[0]
-        loss: torch.Tensor = self.loss_step(x)
-        self.log('train_loss', loss, prog_bar = True)
-        return loss
+        return self.loss_step(batch, split = 'train')
 
     def validation_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
-
-        x: torch.Tensor = batch[0]
-        loss: torch.Tensor = self.loss_step(x)
-        self.log('val_loss', loss, prog_bar = True)
-        return loss
+        return self.loss_step(batch, split = 'val')
     
 
     def predict_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
@@ -183,43 +199,41 @@ class VTAE(pl.LightningModule):
         # Normalize the MDN loss
         mdn_loss = (mdn_loss - mdn_loss.min()) / (mdn_loss.max() - mdn_loss.min())
 
-        # Target dimensions
-        image_h: int = self.hparams.image_shape[1]  # type: ignore
-        image_w: int = self.hparams.image_shape[2]  # type: ignore
+        # Number of patches on the vertical and horizontal axes
+        vertical_patches: int = self.hparams.image_shape[1] // self.hparams.patch_shape[0]  # type: ignore
+        horizontal_patches: int = self.hparams.image_shape[2] // self.hparams.patch_shape[1]    # type: ignore
 
         # Reshape the anomaly map
-        anomaly_map: torch.Tensor = mdn_loss.view(mdn_loss.size(0),
-                                                  1,
-                                                  image_h // self.hparams.patch_shape[0],   # type: ignore
-                                                  image_w // self.hparams.patch_shape[1]    # type: ignore
-                                                  )
+        anomaly_map: torch.Tensor = mdn_loss.view(x.size(0), 1, vertical_patches, horizontal_patches)
 
         # Upsample to original size
         anomaly_map = self.upsampler(anomaly_map)
 
         # gaussian filter
-        sigma: list[float] = [image_h / 128, image_w / 128]
+        sigma: list[float] = [vertical_patches / 2, horizontal_patches / 2]
         kernel_size: list[int] = [2 * round(4 * s) + 1 for s in sigma]
         anomaly_map = gaussian_blur(anomaly_map, kernel_size = kernel_size, sigma = sigma)
         
         return anomaly_map
     
-    def test_step(self, batch: list[torch.Tensor]) -> None:
+    def test_step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor|None]:
 
         predictions: torch.Tensor = self.predict_step(batch)
         ground_truth: torch.Tensor = batch[1]
 
         # Compute the metrics
         auroc: torch.Tensor = binary_auroc(predictions, ground_truth.int())
-        pro: torch.Tensor = pro_score(predictions, ground_truth, threshold = 0.5)
+        pro: torch.Tensor = pro_score(predictions.float(), ground_truth, threshold = self.hparams.threshold)    # type: ignore
 
         # Log the metrics
         self.log('auroc', auroc, prog_bar = True)
         self.log('pro_score', pro, prog_bar = True)
 
+        return {'loss': None, 'auroc': None, 'pro_score': pro}
+
 
     def configure_optimizers(self) -> torch.optim.Adam:
         return torch.optim.Adam(self.parameters(),
                                 lr = self.hparams.lr,   # type: ignore
-                                weight_decay = 1e-4
+                                weight_decay = self.hparams.weight_decay    # type: ignore
                                 )
