@@ -45,7 +45,7 @@ class Decoder(nn.Module):
                 # The last layer uses Tanh
                 deconv_block = nn.Sequential(nn.ConvTranspose2d(**params), nn.Tanh())
             else:
-                deconv_block = nn.Sequential(nn.ConvTranspose2d(**params), nn.BatchNorm2d(params['out_channels']), nn.ReLU(inplace=True))
+                deconv_block = nn.Sequential(nn.ConvTranspose2d(**params), nn.BatchNorm2d(params['out_channels']), nn.ReLU(inplace = True))
             
             layers.insert(0, deconv_block)
         self.decoder: nn.Sequential = nn.Sequential(*layers)

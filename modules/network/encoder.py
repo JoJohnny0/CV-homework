@@ -78,12 +78,12 @@ class ViTEncoder(nn.Module):
                                                                                nhead = heads,
                                                                                dim_feedforward = ff_dim,
                                                                                activation = 'gelu',
-                                                                               norm_first = True,
+                                                                               norm_first = True
                                                                                )
         if use_dytanh:
             encoder_layer.norm1 = DyTanh(embedding_dim) # type: ignore
             encoder_layer.norm2 = DyTanh(embedding_dim) # type: ignore
-        self.transformer: nn.TransformerEncoder = nn.TransformerEncoder(encoder_layer, num_layers = depth)
+        self.transformer: nn.TransformerEncoder = nn.TransformerEncoder(encoder_layer, num_layers = depth, enable_nested_tensor = False)
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
