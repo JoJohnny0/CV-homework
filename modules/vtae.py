@@ -226,7 +226,7 @@ class VTAE(pl.LightningModule):
         
         return anomaly_map
     
-    def test_step(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor|None]:
+    def test_step(self, batch: list[torch.Tensor]) -> None:
 
         predictions: torch.Tensor = self.predict_step(batch)
         ground_truth: torch.Tensor = batch[1]
@@ -235,7 +235,11 @@ class VTAE(pl.LightningModule):
         auroc: torch.Tensor = binary_auroc(predictions, ground_truth.int())
         pro: torch.Tensor = pro_score(predictions.float(), ground_truth, threshold = self.hparams.threshold)    # type: ignore
 
-        return {'loss': None, 'auroc': auroc, 'pro_score': pro}
+        # Log the metrics
+        self.log('auroc', auroc, prog_bar = True)
+        self.log('pro_score', pro, prog_bar = True)
+
+        return None
 
 
     def configure_optimizers(self) -> torch.optim.Adam:
