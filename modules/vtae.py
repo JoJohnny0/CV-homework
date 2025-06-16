@@ -9,6 +9,7 @@ from typing import Literal
 
 from anomalib.metrics.pro import pro_score
 import lightning.pytorch as pl
+from lightning.pytorch.loggers import TensorBoardLogger
 import torch
 from torch.distributions import Normal
 import torch.nn as nn
@@ -36,7 +37,7 @@ class VTAE(pl.LightningModule):
                  ff_dim: int,
                  mdn_components: int,
                  noise: float = 0.,
-                 loss_weights: tuple[float, float, float] = (1/3, 1/3, 1/3),
+                 loss_weights: tuple[float, float, float] = (1., 1. ,1.),
                  lr: float = 1e-3,
                  weight_decay: float = 0.,
                  use_dytanh: bool = False,
@@ -161,6 +162,9 @@ class VTAE(pl.LightningModule):
         recon: torch.Tensor
         features, recon = self(x)
 
+        # Save the recontruction to log at train epoch end
+        self.latest_recon: torch.Tensor = recon
+
         # Loss terms
         recon_loss: torch.Tensor = self.mse_loss(recon, x)
         ssim_loss: torch.Tensor = self.ssim_loss(x, recon)
@@ -188,6 +192,12 @@ class VTAE(pl.LightningModule):
 
     def validation_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
         return self.loss_step(batch, split = 'val')
+    
+    def on_train_epoch_end(self) -> None:
+
+        # If using TensorBoard, log the latest reconstruction image
+        if isinstance(self.logger, TensorBoardLogger):
+            self.logger.experiment.add_image('reconstruction', self.latest_recon[0], self.current_epoch)
     
 
     def predict_step(self, batch: list[torch.Tensor]) -> torch.Tensor:
@@ -225,11 +235,7 @@ class VTAE(pl.LightningModule):
         auroc: torch.Tensor = binary_auroc(predictions, ground_truth.int())
         pro: torch.Tensor = pro_score(predictions.float(), ground_truth, threshold = self.hparams.threshold)    # type: ignore
 
-        # Log the metrics
-        self.log('auroc', auroc, prog_bar = True)
-        self.log('pro_score', pro, prog_bar = True)
-
-        return {'loss': None, 'auroc': None, 'pro_score': pro}
+        return {'loss': None, 'auroc': auroc, 'pro_score': pro}
 
 
     def configure_optimizers(self) -> torch.optim.Adam:
