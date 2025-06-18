@@ -14,7 +14,7 @@ To install the dependencies from [requirements.txt](requirements.txt), run
 pip install -r requirements.txt
 ```
 
-It contains the required libraries to run the code, alongside the version used for the experiments. Other versions may work as well.
+It contains the required libraries to run the code, alongside their version used in the experiments. Other versions may work as well.
 
 ### Install libgl1
 
@@ -30,4 +30,4 @@ Follow the links [[MVTech](https://www.kaggle.com/datasets/ipythonx/mvtec-ad), [
 
 ### Run the Code
 
-To run the code use the notebook [main.ipynb](main.ipynb). It contains grouped together in the [Globals](main.ipynb#globals) sections all the parameters available to change in order to continue the experiments.
+Use [main.ipynb](main.ipynb) to run the code. It contains, in the [Globals](main.ipynb#globals) section, all the parameters that can be changed in order to continue (or replicate) the experiments.
