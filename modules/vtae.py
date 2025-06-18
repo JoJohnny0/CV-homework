@@ -207,7 +207,7 @@ class VTAE(pl.LightningModule):
         mdn_loss: torch.Tensor = self.mdn_loss(features)
         
         # Normalize the MDN loss
-        mdn_loss = (mdn_loss - mdn_loss.min()) / (mdn_loss.max() - mdn_loss.min())
+        mdn_loss = (mdn_loss - mdn_loss.min()) / (mdn_loss.max() - mdn_loss.min() + 1e-8)
 
         # Number of patches on the vertical and horizontal axes
         vertical_patches: int = self.hparams.image_shape[1] // self.hparams.patch_shape[0]  # type: ignore
