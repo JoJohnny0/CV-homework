@@ -31,10 +31,10 @@ class VTAE(pl.LightningModule):
                  latent_channels: int,
                  heads: int,
                  depth: int,
+                 ff_dim: int,
                  caps_per_patch: int,
                  caps_dim: int,
                  caps_iterations: int,
-                 ff_dim: int,
                  mdn_components: int,
                  noise: float = 0.,
                  loss_weights: tuple[float, float, float] = (1., 1. ,1.),
@@ -52,10 +52,10 @@ class VTAE(pl.LightningModule):
             latent_channels: Number of channels in the latent space.
             heads: Number of attention heads in the transformer encoder. To ensure compatibility with the decoder, it should be a divisor of the latent_channels. It may also work with other values.
             depth: Number of transformer encoder layers.
+            ff_dim: Dimension of the feedforward network in the transformer encoder.
             caps_per_patch: Number of capsules per patch.
             caps_dim: Dimension of the capsules in the capsule layer.
             caps_iterations: Number of routing iterations in the capsule layer.
-            ff_dim: Dimension of the feedforward network in the transformer encoder.
             mdn_components: Number of mixture components in the mixture density network.
             noise: Standard deviation of the Gaussian noise added to the features during training.
             loss_weights: Weights for the reconstruction loss, SSIM loss, and MDN loss.
