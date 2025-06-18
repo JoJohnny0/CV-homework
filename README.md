@@ -8,7 +8,7 @@ The starting point is [VT-ADL: A Vision Transformer Network for Image Anomaly De
 
 ### Install the Dependencies
 
-To install the dependencies from [requirements.txt](requirements.txt) run
+To install the dependencies from [requirements.txt](requirements.txt), run
 
 ```bash
 pip install -r requirements.txt
@@ -26,7 +26,7 @@ apt-get install libgl1
 
 ### Download the Datasets
 
-Follow the links [[MVTech](https://www.kaggle.com/datasets/ipythonx/mvtec-ad), [BTAD](https://www.kaggle.com/datasets/thtuan/btad-beantech-anomaly-detection)] to download the datasets from Kaggle and save them in `datasets/{dataset_name}`. In your final folder you should contain `datasets/MVTech/bottle/...`
+Follow the links [[MVTech](https://www.kaggle.com/datasets/ipythonx/mvtec-ad), [BTAD](https://www.kaggle.com/datasets/thtuan/btad-beantech-anomaly-detection)] to download the datasets from Kaggle and save them in `datasets/{dataset_name}`. Your final folder should contain `datasets/MVTech/bottle/...`
 
 ### Run the Code
 
